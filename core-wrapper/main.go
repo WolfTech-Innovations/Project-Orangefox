@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,37 +34,6 @@ type Member struct {
 	JoinDate  time.Time `json:"join_date"`
 	Balance   string    `json:"balance"`
 	LastUBI   time.Time `json:"last_ubi"`
-	IsVendor  bool      `json:"is_vendor"`
-	VendorKey string    `json:"vendor_key,omitempty"`
-}
-
-type Vendor struct {
-	Address     string    `json:"address"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Items       []Item    `json:"items"`
-	APIKey      string    `json:"api_key"`
-	Active      bool      `json:"active"`
-	JoinDate    time.Time `json:"join_date"`
-}
-
-type Item struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Price       string `json:"price"`
-	Stock       int    `json:"stock"`
-	Available   bool   `json:"available"`
-}
-
-type Purchase struct {
-	ID        string    `json:"id"`
-	Buyer     string    `json:"buyer"`
-	Vendor    string    `json:"vendor"`
-	ItemID    string    `json:"item_id"`
-	Amount    string    `json:"amount"`
-	Timestamp time.Time `json:"timestamp"`
-	Status    string    `json:"status"`
 }
 
 type Transaction struct {
@@ -79,8 +46,6 @@ type Transaction struct {
 
 type CommunityState struct {
 	Members      map[string]*Member `json:"members"`
-	Vendors      map[string]*Vendor `json:"vendors"`
-	Purchases    []Purchase         `json:"purchases"`
 	Transactions []Transaction      `json:"transactions"`
 	UBIAmount    string            `json:"ubi_amount"`
 	UBIInterval  time.Duration     `json:"ubi_interval"`
@@ -124,8 +89,6 @@ func (p *ProcessInfo) GetOutput() []string {
 func initCommunityState() {
 	state = &CommunityState{
 		Members:      make(map[string]*Member),
-		Vendors:      make(map[string]*Vendor),
-		Purchases:    []Purchase{},
 		Transactions: []Transaction{},
 		UBIAmount:    "100",
 		UBIInterval:  24 * time.Hour,
@@ -147,72 +110,6 @@ func saveState() {
 	defer state.mu.RUnlock()
 	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile("community_state.json", data, 0644)
-}
-
-func generateAPIKey() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func verifyVendorKey(address, apiKey string) bool {
-	state.mu.RLock()
-	defer state.mu.RUnlock()
-	
-	vendor, exists := state.Vendors[address]
-	if !exists || !vendor.Active {
-		return false
-	}
-	return vendor.APIKey == apiKey
-}
-
-func createPurchase(buyer, vendor, itemID, amount string) (*Purchase, error) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	
-	v, exists := state.Vendors[vendor]
-	if !exists {
-		return nil, fmt.Errorf("vendor not found")
-	}
-	
-	var item *Item
-	for i := range v.Items {
-		if v.Items[i].ID == itemID {
-			item = &v.Items[i]
-			break
-		}
-	}
-	
-	if item == nil || !item.Available || item.Stock <= 0 {
-		return nil, fmt.Errorf("item not available")
-	}
-	
-	purchase := Purchase{
-		ID:        generateAPIKey()[:16],
-		Buyer:     buyer,
-		Vendor:    vendor,
-		ItemID:    itemID,
-		Amount:    amount,
-		Timestamp: time.Now(),
-		Status:    "completed",
-	}
-	
-	item.Stock--
-	if item.Stock == 0 {
-		item.Available = false
-	}
-	
-	state.Purchases = append(state.Purchases, purchase)
-	state.Transactions = append(state.Transactions, Transaction{
-		From:      buyer,
-		To:        vendor,
-		Amount:    amount,
-		Timestamp: time.Now(),
-		Type:      "purchase",
-	})
-	
-	saveState()
-	return &purchase, nil
 }
 
 func getBalance(address string) (string, error) {
@@ -408,11 +305,6 @@ func createDashboard() *tview.Flex {
 		SetDynamicColors(true).
 		SetScrollable(true)
 	
-	// Vendors list
-	vendorsView := tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true)
-	
 	// Transactions list
 	txView := tview.NewTextView().
 		SetDynamicColors(true).
@@ -426,21 +318,17 @@ func createDashboard() *tview.Flex {
 		stats := fmt.Sprintf(
 			"[yellow::b]═══ COMMUNITY STATS ═══[-]\n"+
 			"[cyan]Members:[-] %d\n"+
-			"[cyan]Vendors:[-] %d\n"+
 			"[cyan]UBI Amount:[-] %s units\n"+
 			"[cyan]UBI Interval:[-] %s\n"+
 			"[cyan]Last UBI:[-] %s\n"+
 			"[cyan]Next UBI:[-] %s\n"+
-			"[cyan]Total Transactions:[-] %d\n"+
-			"[cyan]Total Purchases:[-] %d\n",
+			"[cyan]Total Transactions:[-] %d\n",
 			len(state.Members),
-			len(state.Vendors),
 			state.UBIAmount,
 			state.UBIInterval.String(),
 			state.LastUBI.Format("15:04:05"),
 			state.LastUBI.Add(state.UBIInterval).Format("15:04:05"),
 			len(state.Transactions),
-			len(state.Purchases),
 		)
 		statsView.SetText(stats)
 		
@@ -448,40 +336,14 @@ func createDashboard() *tview.Flex {
 		members := "[yellow::b]═══ MEMBERS ═══[-]\n"
 		for addr, member := range state.Members {
 			balance, _ := getBalance(addr)
-			vendorTag := ""
-			if member.IsVendor {
-				vendorTag = " [green][VENDOR][-]"
-			}
 			members += fmt.Sprintf(
-				"[cyan]%s...%s[-]%s\n  Joined: %s | Balance: %s\n",
+				"[cyan]%s...%s[-]\n  Joined: %s | Balance: %s\n",
 				addr[:6], addr[len(addr)-4:],
-				vendorTag,
 				member.JoinDate.Format("2006-01-02"),
 				balance,
 			)
 		}
 		membersView.SetText(members)
-		
-		// Vendors
-		vendors := "[yellow::b]═══ VENDORS ═══[-]\n"
-		for _, vendor := range state.Vendors {
-			status := "[red]INACTIVE[-]"
-			if vendor.Active {
-				status = "[green]ACTIVE[-]"
-			}
-			vendors += fmt.Sprintf(
-				"[cyan::b]%s[-] %s\n  %s\n  Items: %d | API: %s...\n",
-				vendor.Name,
-				status,
-				vendor.Description,
-				len(vendor.Items),
-				vendor.APIKey[:8],
-			)
-		}
-		if len(state.Vendors) == 0 {
-			vendors += "[gray]No vendors registered[-]\n"
-		}
-		vendorsView.SetText(vendors)
 		
 		// Recent transactions
 		txList := "[yellow::b]═══ RECENT TRANSACTIONS ═══[-]\n"
@@ -490,16 +352,9 @@ func createDashboard() *tview.Flex {
 			start = 0
 		}
 		for _, tx := range state.Transactions[start:] {
-			typeColor := "white"
-			if tx.Type == "UBI" {
-				typeColor = "green"
-			} else if tx.Type == "purchase" {
-				typeColor = "yellow"
-			}
 			txList += fmt.Sprintf(
-				"[%s][%s][-] %s → %s: %s units\n",
+				"[%s] %s → %s: %s units\n",
 				tx.Timestamp.Format("15:04:05"),
-				typeColor, tx.Type,
 				tx.From[:8]+"...",
 				tx.To[:8]+"...",
 				tx.Amount,
@@ -517,10 +372,8 @@ func createDashboard() *tview.Flex {
 		}
 	}()
 	
-	flex.AddItem(statsView, 12, 0, false).
-		AddItem(tview.NewFlex().
-			AddItem(membersView, 0, 1, false).
-			AddItem(vendorsView, 0, 1, false), 0, 1, false).
+	flex.AddItem(statsView, 10, 0, false).
+		AddItem(membersView, 0, 1, false).
 		AddItem(txView, 0, 1, false)
 	
 	updateDashboard()
@@ -549,12 +402,10 @@ func createMemberForm() *tview.Form {
 		
 		state.mu.Lock()
 		state.Members[wallet.Address] = &Member{
-			Address:   wallet.Address,
-			JoinDate:  time.Now(),
-			Balance:   "0",
-			LastUBI:   time.Time{},
-			IsVendor:  false,
-			VendorKey: "",
+			Address:  wallet.Address,
+			JoinDate: time.Now(),
+			Balance:  "0",
+			LastUBI:  time.Time{},
 		}
 		state.mu.Unlock()
 		saveState()
@@ -579,153 +430,6 @@ func createMemberForm() *tview.Form {
 	})
 	
 	return form
-}
-
-func createVendorForm() *tview.Form {
-	form := tview.NewForm()
-	form.SetBorder(true).SetTitle(" Register Vendor ").SetTitleAlign(tview.AlignLeft)
-	
-	var address, name, description string
-	
-	form.AddInputField("Member Address", "", 50, nil, func(text string) {
-		address = text
-	})
-	
-	form.AddInputField("Business Name", "", 40, nil, func(text string) {
-		name = text
-	})
-	
-	form.AddInputField("Description", "", 60, nil, func(text string) {
-		description = text
-	})
-	
-	form.AddButton("Register", func() {
-		if address == "" || name == "" {
-			return
-		}
-		
-		state.mu.Lock()
-		member, exists := state.Members[address]
-		if !exists {
-			state.mu.Unlock()
-			return
-		}
-		
-		apiKey := generateAPIKey()
-		
-		state.Vendors[address] = &Vendor{
-			Address:     address,
-			Name:        name,
-			Description: description,
-			Items:       []Item{},
-			APIKey:      apiKey,
-			Active:      true,
-			JoinDate:    time.Now(),
-		}
-		
-		member.IsVendor = true
-		member.VendorKey = apiKey
-		state.mu.Unlock()
-		saveState()
-		
-		// Show API key
-		modal := tview.NewModal().
-			SetText(fmt.Sprintf(
-				"Vendor Registered!\n\n"+
-				"Business: %s\n"+
-				"API Key: %s\n\n"+
-				"[yellow]SAVE THIS API KEY![-]\n"+
-				"Use it for marketplace API access",
-				name, apiKey,
-			)).
-			AddButtons([]string{"OK"}).
-			SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-				pages.SwitchToPage("dashboard")
-			})
-		
-		pages.AddPage("vendor-info", modal, true, true)
-	})
-	
-	form.AddButton("Cancel", func() {
-		pages.SwitchToPage("dashboard")
-	})
-	
-	return form
-}
-
-func createMarketplaceView() *tview.Flex {
-	flex := tview.NewFlex().SetDirection(tview.FlexRow)
-	
-	vendorList := tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true)
-	
-	itemList := tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true)
-	
-	updateMarketplace := func() {
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		vendors := "[yellow::b]═══ MARKETPLACE - VENDORS ═══[-]\n\n"
-		items := "[yellow::b]═══ AVAILABLE ITEMS ═══[-]\n\n"
-		
-		for _, vendor := range state.Vendors {
-			if !vendor.Active {
-				continue
-			}
-			
-			vendors += fmt.Sprintf(
-				"[cyan::b]%s[-]\n"+
-				"  %s\n"+
-				"  Address: %s...%s\n"+
-				"  Items: %d\n\n",
-				vendor.Name,
-				vendor.Description,
-				vendor.Address[:6], vendor.Address[len(vendor.Address)-4:],
-				len(vendor.Items),
-			)
-			
-			for _, item := range vendor.Items {
-				if !item.Available || item.Stock <= 0 {
-					continue
-				}
-				
-				items += fmt.Sprintf(
-					"[white::b]%s[-] - %s units\n"+
-					"  %s\n"+
-					"  Stock: %d | Vendor: %s\n"+
-					"  ID: %s\n\n",
-					item.Name, item.Price,
-					item.Description,
-					item.Stock, vendor.Name,
-					item.ID,
-				)
-			}
-		}
-		
-		if len(state.Vendors) == 0 {
-			vendors += "[gray]No vendors registered[-]\n"
-		}
-		
-		vendorList.SetText(vendors)
-		itemList.SetText(items)
-	}
-	
-	go func() {
-		for {
-			time.Sleep(5 * time.Second)
-			updateMarketplace()
-			app.Draw()
-		}
-	}()
-	
-	flex.AddItem(vendorList, 0, 1, false).
-		AddItem(itemList, 0, 1, false)
-	
-	updateMarketplace()
-	return flex
 }
 
 func main() {
@@ -770,7 +474,7 @@ func main() {
 	
 	// Header
 	header := tview.NewTextView().
-		SetText("[yellow::b]WolfTech Innovations | The Core[-]\n[gray]P: Processes | D: Dashboard | M: Add Member | V: Register Vendor | K: Marketplace | U: UBI | Q: Quit[-]").
+		SetText("[yellow::b]WolfTech Innovations | The Core[-]\n[gray]Tab: Switch View | P: Processes | D: Dashboard | M: Add Member | U: Distribute UBI | Q: Quit[-]").
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignCenter)
 	
@@ -779,16 +483,12 @@ func main() {
 	_ = updateProcessUI // Keep the update function available
 	dashboardView := createDashboard()
 	memberForm := createMemberForm()
-	vendorForm := createVendorForm()
-	marketplaceView := createMarketplaceView()
 	
 	// Content area
 	contentPages := tview.NewPages()
 	contentPages.AddPage("processes", processView, true, true)
 	contentPages.AddPage("dashboard", dashboardView, true, false)
 	contentPages.AddPage("add-member", memberForm, true, false)
-	contentPages.AddPage("register-vendor", vendorForm, true, false)
-	contentPages.AddPage("marketplace", marketplaceView, true, false)
 	
 	// Footer
 	footer := tview.NewTextView().
@@ -862,10 +562,6 @@ func main() {
 			contentPages.SwitchToPage("dashboard")
 		case 'm', 'M':
 			contentPages.SwitchToPage("add-member")
-		case 'v', 'V':
-			contentPages.SwitchToPage("register-vendor")
-		case 'k', 'K':
-			contentPages.SwitchToPage("marketplace")
 		case 'u', 'U':
 			distributeUBI()
 		case '1':
@@ -894,7 +590,7 @@ func main() {
 			}
 		}
 		return event
-	}))
+	})
 	
 	// Auto-start WolfEther
 	go func() {
