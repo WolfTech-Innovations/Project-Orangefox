@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
@@ -1006,7 +1007,9 @@ func createMarketplaceView() *tview.Flex {
 func createWalletBackupsView() *tview.Flex {
 	flex := tview.NewFlex().SetDirection(tview.FlexColumn)
 	
-	memberList := tview.NewList()
+	memberList := tview.NewList().
+		SetSelectedBackgroundColor(tcell.ColorDarkCyan).
+		SetSecondaryTextColor(tcell.ColorGray)
 	
 	detailView := tview.NewTextView().
 		SetDynamicColors(true).
@@ -1015,14 +1018,11 @@ func createWalletBackupsView() *tview.Flex {
 	
 	detailView.SetBorder(true).SetTitle(" Wallet Details ").SetTitleAlign(tview.AlignLeft)
 	
-	var members []string
-	
 	updateWalletList := func() {
 		state.mu.RLock()
 		defer state.mu.RUnlock()
 		
 		memberList.Clear()
-		members = make([]string, 0)
 		
 		if len(state.Members) == 0 {
 			detailView.SetText("[gray]No members registered yet[-]")
@@ -1040,52 +1040,50 @@ func createWalletBackupsView() *tview.Flex {
 				vendorTag = " [VENDOR]"
 			}
 			
-			members = append(members, addr)
-			
-			memberList.AddItem(name+vendorTag, addr[:16]+"...", 0, nil)
+			memberList.AddItem(name+vendorTag, addr[:16]+"...", 0, func() {
+				// Show details when selected
+				state.mu.RLock()
+				defer state.mu.RUnlock()
+				
+				selectedAddr := ""
+				for a := range state.Members {
+					if strings.HasPrefix(a, memberList.GetItemSecondaryText(memberList.GetCurrentItem())[:16]) {
+						selectedAddr = a
+						break
+					}
+				}
+				
+				if selectedAddr != "" {
+					m := state.Members[selectedAddr]
+					details := fmt.Sprintf(
+						"[yellow::b]Member Details[-]\n\n"+
+						"[cyan]Name:[-] %s\n"+
+						"[cyan]Address:[-] %s\n\n"+
+						"[cyan]Mnemonic Phrase:[-]\n[white]%s[-]\n\n"+
+						"[cyan]Join Date:[-] %s\n"+
+						"[cyan]Vendor:[-] %v\n",
+						m.Name,
+						m.Address,
+						m.Mnemonic,
+						m.JoinDate.Format("2006-01-02 15:04:05"),
+						m.IsVendor,
+					)
+					
+					if m.IsVendor {
+						details += fmt.Sprintf("[cyan]Vendor API Key:[-] %s\n", m.VendorKey)
+					}
+					
+					detailView.SetText(details)
+				}
+			})
 		}
 		
 		// Show first member by default
 		if memberList.GetItemCount() > 0 {
-			showMemberDetails(0)
+			memberList.SetCurrentItem(0)
+			memberList.GetItemSelected(0)()
 		}
 	}
-	
-	showMemberDetails := func(idx int) {
-		if idx < 0 || idx >= len(members) {
-			return
-		}
-		
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		selectedAddr := members[idx]
-		m := state.Members[selectedAddr]
-		
-		details := fmt.Sprintf(
-			"[yellow::b]Member Details[-]\n\n"+
-			"[cyan]Name:[-] %s\n"+
-			"[cyan]Address:[-] %s\n\n"+
-			"[cyan]Mnemonic Phrase:[-]\n[white]%s[-]\n\n"+
-			"[cyan]Join Date:[-] %s\n"+
-			"[cyan]Vendor:[-] %v\n",
-			m.Name,
-			m.Address,
-			m.Mnemonic,
-			m.JoinDate.Format("2006-01-02 15:04:05"),
-			m.IsVendor,
-		)
-		
-		if m.IsVendor {
-			details += fmt.Sprintf("[cyan]Vendor API Key:[-] %s\n", m.VendorKey)
-		}
-		
-		detailView.SetText(details)
-	}
-	
-	memberList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		showMemberDetails(index)
-	})
 	
 	updateWalletList()
 	
