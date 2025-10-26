@@ -33,8 +33,6 @@ type ProcessInfo struct {
 
 type Member struct {
 	Address   string    `json:"address"`
-	Name      string    `json:"name"`
-	Mnemonic  string    `json:"mnemonic"`
 	JoinDate  time.Time `json:"join_date"`
 	Balance   string    `json:"balance"`
 	LastUBI   time.Time `json:"last_ubi"`
@@ -215,273 +213,6 @@ func createPurchase(buyer, vendor, itemID, amount string) (*Purchase, error) {
 	
 	saveState()
 	return &purchase, nil
-}
-
-// Marketplace API Server
-func startMarketplaceAPI() {
-	mux := http.NewServeMux()
-	
-	// Middleware for API key verification
-	requireVendorAuth := func(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			apiKey := r.Header.Get("X-API-Key")
-			vendorAddr := r.Header.Get("X-Vendor-Address")
-			
-			if apiKey == "" || vendorAddr == "" {
-				http.Error(w, "Missing authentication headers", http.StatusUnauthorized)
-				return
-			}
-			
-			if !verifyVendorKey(vendorAddr, apiKey) {
-				http.Error(w, "Invalid API key", http.StatusForbidden)
-				return
-			}
-			
-			next(w, r)
-		}
-	}
-	
-	// GET /api/vendors - List all vendors (public)
-	mux.HandleFunc("/api/vendors", func(w http.ResponseWriter, r *http.Request) {
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		vendors := []map[string]interface{}{}
-		for _, v := range state.Vendors {
-			if v.Active {
-				vendors = append(vendors, map[string]interface{}{
-					"address":     v.Address,
-					"name":        v.Name,
-					"description": v.Description,
-					"items":       len(v.Items),
-					"join_date":   v.JoinDate,
-				})
-			}
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"vendors": vendors,
-			"count":   len(vendors),
-		})
-	})
-	
-	// GET /api/items - List all available items (public)
-	mux.HandleFunc("/api/items", func(w http.ResponseWriter, r *http.Request) {
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		items := []map[string]interface{}{}
-		for _, vendor := range state.Vendors {
-			if !vendor.Active {
-				continue
-			}
-			for _, item := range vendor.Items {
-				if item.Available && item.Stock > 0 {
-					items = append(items, map[string]interface{}{
-						"id":          item.ID,
-						"name":        item.Name,
-						"description": item.Description,
-						"price":       item.Price,
-						"stock":       item.Stock,
-						"vendor":      vendor.Name,
-						"vendor_addr": vendor.Address,
-					})
-				}
-			}
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"items": items,
-			"count": len(items),
-		})
-	})
-	
-	// POST /api/vendor/items - Add item (requires vendor auth)
-	mux.HandleFunc("/api/vendor/items", requireVendorAuth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		
-		vendorAddr := r.Header.Get("X-Vendor-Address")
-		
-		var req struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			Price       string `json:"price"`
-			Stock       int    `json:"stock"`
-		}
-		
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		
-		state.mu.Lock()
-		vendor := state.Vendors[vendorAddr]
-		
-		item := Item{
-			ID:          generateAPIKey()[:12],
-			Name:        req.Name,
-			Description: req.Description,
-			Price:       req.Price,
-			Stock:       req.Stock,
-			Available:   true,
-		}
-		
-		vendor.Items = append(vendor.Items, item)
-		state.mu.Unlock()
-		saveState()
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"item":    item,
-		})
-	}))
-	
-	// PUT /api/vendor/items/:id - Update item (requires vendor auth)
-	mux.HandleFunc("/api/vendor/items/", requireVendorAuth(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PUT" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		
-		vendorAddr := r.Header.Get("X-Vendor-Address")
-		itemID := strings.TrimPrefix(r.URL.Path, "/api/vendor/items/")
-		
-		var req struct {
-			Price     *string `json:"price,omitempty"`
-			Stock     *int    `json:"stock,omitempty"`
-			Available *bool   `json:"available,omitempty"`
-		}
-		
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		
-		state.mu.Lock()
-		vendor := state.Vendors[vendorAddr]
-		
-		var updated bool
-		for i := range vendor.Items {
-			if vendor.Items[i].ID == itemID {
-				if req.Price != nil {
-					vendor.Items[i].Price = *req.Price
-				}
-				if req.Stock != nil {
-					vendor.Items[i].Stock = *req.Stock
-				}
-				if req.Available != nil {
-					vendor.Items[i].Available = *req.Available
-				}
-				updated = true
-				break
-			}
-		}
-		state.mu.Unlock()
-		
-		if !updated {
-			http.Error(w, "Item not found", http.StatusNotFound)
-			return
-		}
-		
-		saveState()
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-	}))
-	
-	// GET /api/vendor/sales - Get vendor sales (requires vendor auth)
-	mux.HandleFunc("/api/vendor/sales", requireVendorAuth(func(w http.ResponseWriter, r *http.Request) {
-		vendorAddr := r.Header.Get("X-Vendor-Address")
-		
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		sales := []Purchase{}
-		for _, purchase := range state.Purchases {
-			if purchase.Vendor == vendorAddr {
-				sales = append(sales, purchase)
-			}
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sales": sales,
-			"count": len(sales),
-		})
-	}))
-	
-	// POST /api/purchase - Make a purchase (public, but requires wallet signature in production)
-	mux.HandleFunc("/api/purchase", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		
-		var req struct {
-			Buyer  string `json:"buyer"`
-			Vendor string `json:"vendor"`
-			ItemID string `json:"item_id"`
-		}
-		
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		
-		// Get item price
-		state.mu.RLock()
-		vendor, exists := state.Vendors[req.Vendor]
-		if !exists {
-			state.mu.RUnlock()
-			http.Error(w, "Vendor not found", http.StatusNotFound)
-			return
-		}
-		
-		var price string
-		for _, item := range vendor.Items {
-			if item.ID == req.ItemID {
-				price = item.Price
-				break
-			}
-		}
-		state.mu.RUnlock()
-		
-		if price == "" {
-			http.Error(w, "Item not found", http.StatusNotFound)
-			return
-		}
-		
-		purchase, err := createPurchase(req.Buyer, req.Vendor, req.ItemID, price)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"purchase": purchase,
-		})
-	})
-	
-	// Health check
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
-			"time":   time.Now(),
-		})
-	})
-	
-	http.ListenAndServe(":8547", mux)
 }
 
 func getBalance(address string) (string, error) {
@@ -819,8 +550,6 @@ func createMemberForm() *tview.Form {
 		state.mu.Lock()
 		state.Members[wallet.Address] = &Member{
 			Address:   wallet.Address,
-			Name:      name,
-			Mnemonic:  wallet.Mnemonic,
 			JoinDate:  time.Now(),
 			Balance:   "0",
 			LastUBI:   time.Time{},
@@ -833,12 +562,7 @@ func createMemberForm() *tview.Form {
 		// Show wallet info
 		modal := tview.NewModal().
 			SetText(fmt.Sprintf(
-				"Wallet Created for %s!\n\n"+
-				"Address: %s\n\n"+
-				"Mnemonic:\n%s\n\n"+
-				"[yellow]Mnemonic has been backed up in the system[-]\n"+
-				"[gray]Press 'W' to view wallet backups anytime[-]",
-				name,
+				"Wallet Created!\n\nAddress: %s\n\nMnemonic: %s\n\n[red]SAVE THIS MNEMONIC SECURELY![-]",
 				wallet.Address,
 				wallet.Mnemonic,
 			)).
@@ -1004,97 +728,6 @@ func createMarketplaceView() *tview.Flex {
 	return flex
 }
 
-func createWalletBackupsView() *tview.Flex {
-	flex := tview.NewFlex().SetDirection(tview.FlexColumn)
-	
-	memberList := tview.NewList().
-		SetSelectedBackgroundColor(tcell.ColorDarkCyan).
-		SetSecondaryTextColor(tcell.ColorGray)
-	
-	detailView := tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetWordWrap(true)
-	
-	detailView.SetBorder(true).SetTitle(" Wallet Details ").SetTitleAlign(tview.AlignLeft)
-	
-	updateWalletList := func() {
-		state.mu.RLock()
-		defer state.mu.RUnlock()
-		
-		memberList.Clear()
-		
-		if len(state.Members) == 0 {
-			detailView.SetText("[gray]No members registered yet[-]")
-			return
-		}
-		
-		for addr, member := range state.Members {
-			name := member.Name
-			if name == "" {
-				name = addr[:8] + "..."
-			}
-			
-			vendorTag := ""
-			if member.IsVendor {
-				vendorTag = " [VENDOR]"
-			}
-			
-			memberList.AddItem(name+vendorTag, addr[:16]+"...", 0, func() {
-				// Show details when selected
-				state.mu.RLock()
-				defer state.mu.RUnlock()
-				
-				selectedAddr := ""
-				for a := range state.Members {
-					if strings.HasPrefix(a, memberList.GetItemSecondaryText(memberList.GetCurrentItem())[:16]) {
-						selectedAddr = a
-						break
-					}
-				}
-				
-				if selectedAddr != "" {
-					m := state.Members[selectedAddr]
-					details := fmt.Sprintf(
-						"[yellow::b]Member Details[-]\n\n"+
-						"[cyan]Name:[-] %s\n"+
-						"[cyan]Address:[-] %s\n\n"+
-						"[cyan]Mnemonic Phrase:[-]\n[white]%s[-]\n\n"+
-						"[cyan]Join Date:[-] %s\n"+
-						"[cyan]Vendor:[-] %v\n",
-						m.Name,
-						m.Address,
-						m.Mnemonic,
-						m.JoinDate.Format("2006-01-02 15:04:05"),
-						m.IsVendor,
-					)
-					
-					if m.IsVendor {
-						details += fmt.Sprintf("[cyan]Vendor API Key:[-] %s\n", m.VendorKey)
-					}
-					
-					detailView.SetText(details)
-				}
-			})
-		}
-		
-		// Show first member by default
-		if memberList.GetItemCount() > 0 {
-			memberList.SetCurrentItem(0)
-			memberList.GetItemSelected(0)()
-		}
-	}
-	
-	updateWalletList()
-	
-	memberList.SetBorder(true).SetTitle(" Members ").SetTitleAlign(tview.AlignLeft)
-	
-	flex.AddItem(memberList, 0, 1, true).
-		AddItem(detailView, 0, 2, false)
-	
-	return flex
-}
-
 func main() {
 	initCommunityState()
 	
@@ -1137,7 +770,7 @@ func main() {
 	
 	// Header
 	header := tview.NewTextView().
-		SetText("[yellow::b]WolfTech Innovations | The Core[-]\n[gray]P: Processes | D: Dashboard | M: Add Member | V: Register Vendor | K: Marketplace | W: Wallets | U: UBI | Q: Quit[-]").
+		SetText("[yellow::b]WolfTech Innovations | The Core[-]\n[gray]P: Processes | D: Dashboard | M: Add Member | V: Register Vendor | K: Marketplace | U: UBI | Q: Quit[-]").
 		SetDynamicColors(true).
 		SetTextAlign(tview.AlignCenter)
 	
@@ -1148,7 +781,6 @@ func main() {
 	memberForm := createMemberForm()
 	vendorForm := createVendorForm()
 	marketplaceView := createMarketplaceView()
-	walletBackupsView := createWalletBackupsView()
 	
 	// Content area
 	contentPages := tview.NewPages()
@@ -1157,7 +789,6 @@ func main() {
 	contentPages.AddPage("add-member", memberForm, true, false)
 	contentPages.AddPage("register-vendor", vendorForm, true, false)
 	contentPages.AddPage("marketplace", marketplaceView, true, false)
-	contentPages.AddPage("wallets", walletBackupsView, true, false)
 	
 	// Footer
 	footer := tview.NewTextView().
@@ -1235,8 +866,6 @@ func main() {
 			contentPages.SwitchToPage("register-vendor")
 		case 'k', 'K':
 			contentPages.SwitchToPage("marketplace")
-		case 'w', 'W':
-			contentPages.SwitchToPage("wallets")
 		case 'u', 'U':
 			distributeUBI()
 		case '1':
