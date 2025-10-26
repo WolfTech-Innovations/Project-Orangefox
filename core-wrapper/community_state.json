@@ -1,0 +1,14 @@
+{
+  "members": {
+    "0x683447A03fcEbB6561141a7E82a3C6AFE2F09b5A": {
+      "address": "0x683447A03fcEbB6561141a7E82a3C6AFE2F09b5A",
+      "join_date": "2025-10-26T18:33:34.530188924Z",
+      "balance": "0",
+      "last_ubi": "0001-01-01T00:00:00Z"
+    }
+  },
+  "transactions": [],
+  "ubi_amount": "100",
+  "ubi_interval": 86400000000000,
+  "last_ubi": "2025-10-26T18:33:15.405009883Z"
+}
